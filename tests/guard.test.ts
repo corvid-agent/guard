@@ -906,6 +906,196 @@ describe("pipe", () => {
   });
 });
 
+// ─── Async Refinements / Transforms ─────────────────────────────────────────
+
+describe("refineAsync", () => {
+  test("validates with async check", async () => {
+    const schema = g.string().refineAsync(
+      async (v) => v.length > 0,
+      "Must be non-empty"
+    );
+    const result = await schema.parseAsync("hello");
+    expect(result).toBe("hello");
+  });
+
+  test("rejects on failed async check", async () => {
+    const schema = g.string().refineAsync(
+      async (v) => v.length > 3,
+      "Must be longer than 3"
+    );
+    const result = await schema.safeParseAsync("hi");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toBe("Must be longer than 3");
+    }
+  });
+
+  test("still validates underlying schema first", async () => {
+    const schema = g.number().min(0).refineAsync(
+      async (v) => v % 2 === 0,
+      "Must be even"
+    );
+    // Underlying validation fails (not a number)
+    const result = await schema.safeParseAsync("hello");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toBe("Expected number");
+    }
+  });
+
+  test("works with real async operations", async () => {
+    const takenUsernames = new Set(["alice", "bob"]);
+    const Username = g.string().min(3).refineAsync(
+      async (name) => {
+        // Simulate async DB lookup
+        await new Promise((r) => setTimeout(r, 1));
+        return !takenUsernames.has(name);
+      },
+      "Username already taken"
+    );
+
+    expect(await Username.parseAsync("charlie")).toBe("charlie");
+    const result = await Username.safeParseAsync("alice");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toBe("Username already taken");
+    }
+  });
+
+  test("catches thrown errors in async check", async () => {
+    const schema = g.string().refineAsync(async () => {
+      throw new Error("DB connection failed");
+    });
+    const result = await schema.safeParseAsync("hello");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toContain("DB connection failed");
+    }
+  });
+
+  test("sync parse returns error for async schemas", () => {
+    const schema = g.string().refineAsync(async () => true);
+    const result = schema.safeParse("hello");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toContain("parseAsync()");
+    }
+  });
+
+  test("chaining multiple async refinements", async () => {
+    const schema = g.string()
+      .refineAsync(async (v) => v.length >= 3, "Too short")
+      .refineAsync(async (v) => /^[a-z]+$/.test(v), "Lowercase only");
+
+    expect(await schema.parseAsync("hello")).toBe("hello");
+
+    const r1 = await schema.safeParseAsync("hi");
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) expect(r1.issues[0].message).toBe("Too short");
+
+    const r2 = await schema.safeParseAsync("Hello");
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) expect(r2.issues[0].message).toBe("Lowercase only");
+  });
+
+  test("uses default message", async () => {
+    const schema = g.string().refineAsync(async () => false);
+    const result = await schema.safeParseAsync("hello");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toBe("Async refinement check failed");
+    }
+  });
+});
+
+describe("transformAsync", () => {
+  test("transforms value asynchronously", async () => {
+    const schema = g.string().transformAsync(async (v) => v.length);
+    const result = await schema.parseAsync("hello");
+    expect(result).toBe(5);
+  });
+
+  test("validates underlying schema first", async () => {
+    const schema = g.number().transformAsync(async (v) => v * 2);
+    const result = await schema.safeParseAsync("hello");
+    expect(result.ok).toBe(false);
+  });
+
+  test("catches thrown errors in async transform", async () => {
+    const schema = g.string().transformAsync(async () => {
+      throw new Error("transform boom");
+    });
+    const result = await schema.safeParseAsync("hello");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toContain("transform boom");
+    }
+  });
+
+  test("sync parse returns error for async schemas", () => {
+    const schema = g.string().transformAsync(async (v) => v.length);
+    const result = schema.safeParse("hello");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toContain("parseAsync()");
+    }
+  });
+
+  test("chaining transform then async refine", async () => {
+    const schema = g.string()
+      .transform((v) => v.trim())
+      .refineAsync(async (v) => v.length > 0, "Cannot be blank");
+
+    expect(await schema.parseAsync("  hello  ")).toBe("hello");
+
+    const result = await schema.safeParseAsync("   ");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toBe("Cannot be blank");
+    }
+  });
+
+  test("works in object schemas via parseAsync", async () => {
+    const takenEmails = new Set(["taken@example.com"]);
+    const User = g.object({
+      name: g.string().min(1),
+      email: g.string().email().refineAsync(
+        async (e) => !takenEmails.has(e),
+        "Email already registered"
+      ),
+    });
+
+    const result = await User.parseAsync({
+      name: "Alice",
+      email: "alice@example.com",
+    });
+    expect(result).toEqual({ name: "Alice", email: "alice@example.com" });
+
+    const fail = await User.safeParseAsync({
+      name: "Bob",
+      email: "taken@example.com",
+    });
+    expect(fail.ok).toBe(false);
+    if (!fail.ok) {
+      expect(fail.issues[0].message).toBe("Email already registered");
+    }
+  });
+});
+
+describe("parseAsync on sync schemas", () => {
+  test("works with sync schemas transparently", async () => {
+    const schema = g.string().min(3);
+    expect(await schema.parseAsync("hello")).toBe("hello");
+    await expect(schema.parseAsync("hi")).rejects.toThrow();
+  });
+
+  test("safeParseAsync works with sync schemas", async () => {
+    const result = await g.number().safeParseAsync(42);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toBe(42);
+  });
+});
+
 // ─── Special Schemas ────────────────────────────────────────────────────────
 
 describe("any", () => {
