@@ -274,6 +274,211 @@ describe("union", () => {
   });
 });
 
+// ─── Discriminated Union ─────────────────────────────────────────────────────
+
+describe("discriminatedUnion", () => {
+  const Shape = g.discriminatedUnion("type", [
+    g.object({ type: g.literal("circle"), radius: g.number() }),
+    g.object({
+      type: g.literal("rect"),
+      width: g.number(),
+      height: g.number(),
+    }),
+    g.object({ type: g.literal("point") }),
+  ]);
+
+  test("accepts valid circle", () => {
+    const result = Shape.parse({ type: "circle", radius: 5 });
+    expect(result).toEqual({ type: "circle", radius: 5 });
+  });
+
+  test("accepts valid rect", () => {
+    const result = Shape.parse({ type: "rect", width: 10, height: 20 });
+    expect(result).toEqual({ type: "rect", width: 10, height: 20 });
+  });
+
+  test("accepts variant with only discriminator", () => {
+    const result = Shape.parse({ type: "point" });
+    expect(result).toEqual({ type: "point" });
+  });
+
+  test("rejects invalid discriminator value", () => {
+    const result = Shape.safeParse({ type: "triangle", base: 5 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].path).toEqual(["type"]);
+      expect(result.issues[0].message).toContain("Invalid discriminator value");
+      expect(result.issues[0].received).toBe('"triangle"');
+    }
+  });
+
+  test("rejects missing discriminator key", () => {
+    const result = Shape.safeParse({ radius: 5 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].path).toEqual(["type"]);
+      expect(result.issues[0].message).toContain("Missing discriminator key");
+    }
+  });
+
+  test("rejects non-objects", () => {
+    expect(() => Shape.parse("circle")).toThrow();
+    expect(() => Shape.parse(null)).toThrow();
+    expect(() => Shape.parse(42)).toThrow();
+    expect(() => Shape.parse([1])).toThrow();
+  });
+
+  test("validates variant fields after matching discriminator", () => {
+    const result = Shape.safeParse({ type: "circle", radius: "five" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].path).toEqual(["radius"]);
+      expect(result.issues[0].message).toBe("Expected number");
+    }
+  });
+
+  test("validates variant with missing required fields", () => {
+    const result = Shape.safeParse({ type: "rect", width: 10 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].path).toEqual(["height"]);
+    }
+  });
+
+  test("strips unknown keys", () => {
+    const result = Shape.parse({ type: "circle", radius: 5, extra: true });
+    expect(result).toEqual({ type: "circle", radius: 5 });
+    expect((result as any).extra).toBeUndefined();
+  });
+
+  test("works with numeric literal discriminators", () => {
+    const Message = g.discriminatedUnion("code", [
+      g.object({ code: g.literal(200), data: g.string() }),
+      g.object({ code: g.literal(404), error: g.string() }),
+    ]);
+
+    expect(Message.parse({ code: 200, data: "ok" })).toEqual({
+      code: 200,
+      data: "ok",
+    });
+    expect(Message.parse({ code: 404, error: "not found" })).toEqual({
+      code: 404,
+      error: "not found",
+    });
+    expect(() => Message.parse({ code: 500 })).toThrow();
+  });
+
+  test("works with boolean literal discriminators", () => {
+    const Toggle = g.discriminatedUnion("enabled", [
+      g.object({ enabled: g.literal(true), value: g.string() }),
+      g.object({ enabled: g.literal(false), reason: g.string() }),
+    ]);
+
+    expect(Toggle.parse({ enabled: true, value: "on" })).toEqual({
+      enabled: true,
+      value: "on",
+    });
+    expect(Toggle.parse({ enabled: false, reason: "disabled" })).toEqual({
+      enabled: false,
+      reason: "disabled",
+    });
+  });
+
+  test("throws on duplicate discriminator values", () => {
+    expect(() =>
+      g.discriminatedUnion("type", [
+        g.object({ type: g.literal("a"), x: g.number() }),
+        g.object({ type: g.literal("a"), y: g.number() }),
+      ])
+    ).toThrow(/Duplicate discriminator value/);
+  });
+
+  test("throws on missing discriminator in variant", () => {
+    expect(() =>
+      g.discriminatedUnion("type", [
+        g.object({ kind: g.literal("a") }),
+      ] as any)
+    ).toThrow(/missing discriminator key/);
+  });
+
+  test("throws when discriminator is not a literal", () => {
+    expect(() =>
+      g.discriminatedUnion("type", [
+        g.object({ type: g.string() }),
+      ] as any)
+    ).toThrow(/must use g\.literal/);
+  });
+
+  test("safeParse returns correct result shape", () => {
+    const ok = Shape.safeParse({ type: "circle", radius: 5 });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.value).toEqual({ type: "circle", radius: 5 });
+    }
+
+    const fail = Shape.safeParse({ type: "unknown" });
+    expect(fail.ok).toBe(false);
+    if (!fail.ok) {
+      expect(fail.issues.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("type guard with .is()", () => {
+    expect(Shape.is({ type: "circle", radius: 5 })).toBe(true);
+    expect(Shape.is({ type: "circle", radius: "five" })).toBe(false);
+    expect(Shape.is({ type: "triangle" })).toBe(false);
+    expect(Shape.is("circle")).toBe(false);
+  });
+
+  test("works with optional fields in variants", () => {
+    const Event = g.discriminatedUnion("kind", [
+      g.object({
+        kind: g.literal("click"),
+        x: g.number(),
+        y: g.number(),
+        meta: g.string().optional(),
+      }),
+      g.object({
+        kind: g.literal("keypress"),
+        key: g.string(),
+      }),
+    ]);
+
+    expect(Event.parse({ kind: "click", x: 10, y: 20 })).toEqual({
+      kind: "click",
+      x: 10,
+      y: 20,
+    });
+    expect(
+      Event.parse({ kind: "click", x: 10, y: 20, meta: "shift" })
+    ).toEqual({ kind: "click", x: 10, y: 20, meta: "shift" });
+  });
+
+  test("error path includes discriminator for nested usage", () => {
+    const Schema = g.object({
+      shape: Shape,
+    });
+
+    const result = Schema.safeParse({ shape: { type: "circle", radius: "x" } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].path).toEqual(["shape", "radius"]);
+    }
+  });
+
+  test("error path for invalid discriminator in nested context", () => {
+    const Schema = g.object({
+      shape: Shape,
+    });
+
+    const result = Schema.safeParse({ shape: { type: "hexagon" } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].path).toEqual(["shape", "type"]);
+    }
+  });
+});
+
 // ─── Intersection ───────────────────────────────────────────────────────────
 
 describe("intersection", () => {
