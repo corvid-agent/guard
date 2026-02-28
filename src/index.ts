@@ -550,6 +550,127 @@ export class UnionSchema<
   }
 }
 
+// ─── Discriminated Union ─────────────────────────────────────────────────────
+
+type DiscriminatedObjectSchema = ObjectSchema<
+  Record<string, Schema<any>> & { [key: string]: Schema<any> }
+>;
+
+type InferDiscriminatedUnion<
+  T extends readonly DiscriminatedObjectSchema[],
+> = {
+  [K in keyof T]: T[K] extends Schema<infer U> ? U : never;
+}[number];
+
+export class DiscriminatedUnionSchema<
+  D extends string,
+  T extends readonly DiscriminatedObjectSchema[],
+> extends Schema<InferDiscriminatedUnion<T>> {
+  private readonly _map: Map<string | number | boolean, DiscriminatedObjectSchema>;
+
+  constructor(
+    private readonly _discriminator: D,
+    private readonly _schemas: T
+  ) {
+    super();
+    this._map = new Map();
+    for (const schema of _schemas) {
+      const shape = schema.shape;
+      const discSchema = shape[_discriminator];
+      if (!discSchema) {
+        throw new Error(
+          `Discriminated union variant is missing discriminator key "${_discriminator}"`
+        );
+      }
+      // Extract the literal value from the discriminator schema
+      const literalValue = this._extractLiteralValue(discSchema);
+      if (literalValue === undefined) {
+        throw new Error(
+          `Discriminator "${_discriminator}" must use g.literal() in all variants`
+        );
+      }
+      if (this._map.has(literalValue)) {
+        throw new Error(
+          `Duplicate discriminator value ${JSON.stringify(literalValue)} for key "${_discriminator}"`
+        );
+      }
+      this._map.set(literalValue, schema);
+    }
+  }
+
+  private _extractLiteralValue(
+    schema: Schema<any>
+  ): string | number | boolean | undefined {
+    if (schema instanceof LiteralSchema) {
+      // Access the literal value via a test parse — try common types
+      // We use the fact that LiteralSchema stores _value privately
+      // Try to find the value by parsing known sentinel values
+      return (schema as any)._value;
+    }
+    return undefined;
+  }
+
+  _parse(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): ParseResult<InferDiscriminatedUnion<T>> {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return {
+        ok: false,
+        issues: [
+          {
+            path,
+            message: "Expected object",
+            expected: "object",
+            received: Array.isArray(value) ? "array" : typeof value,
+          },
+        ],
+      };
+    }
+
+    const input = value as Record<string, unknown>;
+    const discriminatorValue = input[this._discriminator];
+
+    if (discriminatorValue === undefined) {
+      return {
+        ok: false,
+        issues: [
+          {
+            path: [...path, this._discriminator],
+            message: `Missing discriminator key "${this._discriminator}"`,
+            expected: [...this._map.keys()]
+              .map((v) => JSON.stringify(v))
+              .join(" | "),
+          },
+        ],
+      };
+    }
+
+    const schema = this._map.get(discriminatorValue as string | number | boolean);
+
+    if (!schema) {
+      return {
+        ok: false,
+        issues: [
+          {
+            path: [...path, this._discriminator],
+            message: `Invalid discriminator value ${JSON.stringify(discriminatorValue)}`,
+            expected: [...this._map.keys()]
+              .map((v) => JSON.stringify(v))
+              .join(" | "),
+            received: JSON.stringify(discriminatorValue),
+          },
+        ],
+      };
+    }
+
+    return schema._parse(value, path, coerce) as ParseResult<
+      InferDiscriminatedUnion<T>
+    >;
+  }
+}
+
 export class IntersectionSchema<A, B> extends Schema<A & B> {
   constructor(
     private readonly _left: Schema<A>,
@@ -1254,6 +1375,13 @@ export function intersection<A, B>(
   right: Schema<B>
 ): IntersectionSchema<A, B> {
   return new IntersectionSchema(left, right);
+}
+
+export function discriminatedUnion<
+  D extends string,
+  T extends readonly DiscriminatedObjectSchema[],
+>(discriminator: D, schemas: [...T]): DiscriminatedUnionSchema<D, T> {
+  return new DiscriminatedUnionSchema(discriminator, schemas as unknown as T);
 }
 
 export function object<S extends ObjectShape>(shape: S): ObjectSchema<S> {
