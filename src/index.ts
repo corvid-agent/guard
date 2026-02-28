@@ -38,6 +38,9 @@ export type Infer<S extends Schema<any>> = S extends Schema<infer T>
   ? T
   : never;
 
+declare const BRAND: unique symbol;
+export type Brand<T, B extends string> = T & { [BRAND]: { [K in B]: true } };
+
 export abstract class Schema<T> {
   abstract _parse(
     value: unknown,
@@ -102,6 +105,11 @@ export abstract class Schema<T> {
   /** Check if a value is valid (returns boolean). */
   is(value: unknown): value is T {
     return this._parse(value, [], false).ok;
+  }
+
+  /** Add a brand to the output type for nominal type safety. */
+  brand<B extends string>(): BrandedSchema<T, B> {
+    return new BrandedSchema(this);
   }
 }
 
@@ -1091,6 +1099,22 @@ export class RecordSchema<K extends string, V> extends Schema<Record<K, V>> {
 }
 
 // ─── Modifier Schemas ───────────────────────────────────────────────────────
+
+export class BrandedSchema<T, B extends string> extends Schema<Brand<T, B>> {
+  constructor(private readonly _inner: Schema<T>) {
+    super();
+  }
+
+  _parse(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): ParseResult<Brand<T, B>> {
+    const result = this._inner._parse(value, path, coerce);
+    if (!result.ok) return result as ParseResult<Brand<T, B>>;
+    return { ok: true, value: result.value as Brand<T, B> };
+  }
+}
 
 export class OptionalSchema<T> extends Schema<T | undefined> {
   constructor(private readonly _inner: Schema<T>) {

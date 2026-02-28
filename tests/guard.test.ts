@@ -754,6 +754,113 @@ describe("default", () => {
   });
 });
 
+// ─── Branded Types ──────────────────────────────────────────────────────────
+
+describe("branded", () => {
+  const UserId = g.string().brand<"UserId">();
+  const OrderId = g.string().brand<"OrderId">();
+
+  test("parses the underlying value", () => {
+    const id = UserId.parse("abc-123");
+    expect(id).toBe("abc-123");
+  });
+
+  test("rejects invalid underlying types", () => {
+    expect(() => UserId.parse(42)).toThrow();
+    expect(() => UserId.parse(null)).toThrow();
+  });
+
+  test("safeParse returns branded value", () => {
+    const result = UserId.safeParse("abc");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe("abc");
+    }
+  });
+
+  test("safeParse returns issues on failure", () => {
+    const result = UserId.safeParse(42);
+    expect(result.ok).toBe(false);
+  });
+
+  test("works with number schemas", () => {
+    const Port = g.number().int().min(1).max(65535).brand<"Port">();
+    expect(Port.parse(8080)).toBe(8080);
+    expect(() => Port.parse(0)).toThrow();
+    expect(() => Port.parse(70000)).toThrow();
+    expect(() => Port.parse(3.14)).toThrow();
+  });
+
+  test("type guard with .is()", () => {
+    expect(UserId.is("hello")).toBe(true);
+    expect(UserId.is(42)).toBe(false);
+  });
+
+  test("inferred type has brand", () => {
+    type UID = g.Infer<typeof UserId>;
+    type OID = g.Infer<typeof OrderId>;
+
+    // These would be compile errors without the brand:
+    // const uid: UID = "abc";  // Error: missing brand
+    // const oid: OID = uid;    // Error: brand mismatch
+
+    // But parsing produces branded values:
+    const uid: UID = UserId.parse("abc");
+    const oid: OID = OrderId.parse("xyz");
+    expect(uid).toBe("abc");
+    expect(oid).toBe("xyz");
+  });
+
+  test("works with coercion", () => {
+    const BrandedNum = g.number().brand<"Amount">();
+    const result = BrandedNum.safeCoerce("42");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe(42);
+    }
+  });
+
+  test("works in object schemas", () => {
+    const UserIdSchema = g.string().brand<"UserId">();
+    const User = g.object({
+      id: UserIdSchema,
+      name: g.string(),
+    });
+
+    const user = User.parse({ id: "u-123", name: "Alice" });
+    expect(user.id).toBe("u-123");
+    expect(user.name).toBe("Alice");
+  });
+
+  test("branded + optional", () => {
+    const OptionalId = UserId.optional();
+    expect(OptionalId.parse(undefined)).toBeUndefined();
+    expect(OptionalId.parse("abc")).toBe("abc");
+  });
+
+  test("branded + nullable", () => {
+    const NullableId = UserId.nullable();
+    expect(NullableId.parse(null)).toBeNull();
+    expect(NullableId.parse("abc")).toBe("abc");
+  });
+
+  test("branded + default", () => {
+    // Note: default value needs to be cast since it must match branded type
+    const DefaultId = g.string().default("unknown").brand<"UserId">();
+    expect(DefaultId.parse(undefined)).toBe("unknown");
+    expect(DefaultId.parse("abc")).toBe("abc");
+  });
+
+  test("branded + refine", () => {
+    const NonEmptyUserId = g
+      .string()
+      .min(1)
+      .brand<"UserId">();
+    expect(NonEmptyUserId.parse("abc")).toBe("abc");
+    expect(() => NonEmptyUserId.parse("")).toThrow();
+  });
+});
+
 // ─── Transform / Refine / Pipe ──────────────────────────────────────────────
 
 describe("transform", () => {
