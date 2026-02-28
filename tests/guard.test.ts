@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, afterEach } from "bun:test";
 import * as g from "../src/index";
 
 // ─── String ─────────────────────────────────────────────────────────────────
@@ -1093,6 +1093,206 @@ describe("parseAsync on sync schemas", () => {
     const result = await g.number().safeParseAsync(42);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toBe(42);
+  });
+});
+
+// ─── Preprocess ─────────────────────────────────────────────────────────────
+
+describe("preprocess", () => {
+  test("transforms input before validation", () => {
+    const trimmedString = g.preprocess(
+      (val) => (typeof val === "string" ? val.trim() : val),
+      g.string().min(1)
+    );
+    expect(trimmedString.parse("  hello  ")).toBe("hello");
+  });
+
+  test("rejects after preprocessing fails validation", () => {
+    const trimmedString = g.preprocess(
+      (val) => (typeof val === "string" ? val.trim() : val),
+      g.string().min(1)
+    );
+    expect(() => trimmedString.parse("   ")).toThrow();
+  });
+
+  test("passes non-matching types through", () => {
+    const schema = g.preprocess(
+      (val) => (typeof val === "string" ? val.trim() : val),
+      g.string()
+    );
+    // Non-string passes through untransformed, then fails string validation
+    expect(() => schema.parse(42)).toThrow();
+  });
+
+  test("converts types before validation", () => {
+    const stringToNum = g.preprocess(
+      (val) => (typeof val === "string" ? Number(val) : val),
+      g.number()
+    );
+    expect(stringToNum.parse("42")).toBe(42);
+    expect(stringToNum.parse(42)).toBe(42);
+  });
+
+  test("catches errors in preprocess function", () => {
+    const schema = g.preprocess(() => {
+      throw new Error("preprocess boom");
+    }, g.string());
+    const result = schema.safeParse("hello");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toContain("preprocess boom");
+    }
+  });
+
+  test("works with safeParse", () => {
+    const schema = g.preprocess(
+      (val) => (typeof val === "string" ? val.toUpperCase() : val),
+      g.string()
+    );
+    const result = schema.safeParse("hello");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe("HELLO");
+    }
+  });
+
+  test("works with object schemas", () => {
+    const schema = g.preprocess(
+      (val) => {
+        if (typeof val === "object" && val !== null && "name" in val) {
+          return {
+            ...(val as Record<string, unknown>),
+            name: String((val as any).name).trim(),
+          };
+        }
+        return val;
+      },
+      g.object({ name: g.string().min(1) })
+    );
+
+    expect(schema.parse({ name: "  Alice  " })).toEqual({ name: "Alice" });
+    expect(() => schema.parse({ name: "   " })).toThrow();
+  });
+
+  test("works with type guard", () => {
+    const schema = g.preprocess(
+      (val) => (typeof val === "string" ? val.trim() : val),
+      g.string().min(1)
+    );
+    expect(schema.is("  hello  ")).toBe(true);
+    expect(schema.is("   ")).toBe(false);
+  });
+});
+
+// ─── Custom Error Map ───────────────────────────────────────────────────────
+
+describe("error map", () => {
+  afterEach(() => {
+    // Reset global error map after each test
+    g.setErrorMap(null as any);
+  });
+
+  test("setErrorMap customizes error messages globally", () => {
+    g.setErrorMap((issue) => {
+      if (issue.expected === "string") return "Must be text";
+      return issue.message;
+    });
+
+    const result = g.string().safeParse(42);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toBe("Must be text");
+    }
+  });
+
+  test("error map applies to parse() thrown errors", () => {
+    g.setErrorMap((issue) => {
+      if (issue.expected === "number") return "Needs to be a number";
+      return issue.message;
+    });
+
+    try {
+      g.number().parse("hello");
+    } catch (err) {
+      expect((err as g.ValidationError).issues[0].message).toBe(
+        "Needs to be a number"
+      );
+    }
+  });
+
+  test("error map applies to nested object errors", () => {
+    g.setErrorMap((issue) => {
+      if (issue.expected === "string") return "Campo de texto requerido";
+      return issue.message;
+    });
+
+    const schema = g.object({ name: g.string() });
+    const result = schema.safeParse({ name: 42 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toBe("Campo de texto requerido");
+      expect(result.issues[0].path).toEqual(["name"]);
+    }
+  });
+
+  test("error map does not affect valid parses", () => {
+    g.setErrorMap(() => "CUSTOM ERROR");
+
+    expect(g.string().parse("hello")).toBe("hello");
+    const result = g.string().safeParse("hello");
+    expect(result.ok).toBe(true);
+  });
+
+  test("getErrorMap returns the current error map", () => {
+    expect(g.getErrorMap()).toBeNull();
+
+    const myMap: g.ErrorMap = (issue) => issue.message;
+    g.setErrorMap(myMap);
+    expect(g.getErrorMap()).toBe(myMap);
+  });
+
+  test("error map applies to coerce errors", () => {
+    g.setErrorMap((issue) => {
+      if (issue.expected === "number") return "Not a valid number";
+      return issue.message;
+    });
+
+    const result = g.number().safeCoerce("abc");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toBe("Not a valid number");
+    }
+  });
+
+  test("error map can use all issue fields", () => {
+    g.setErrorMap((issue) => {
+      const parts: string[] = [];
+      if (issue.path.length) parts.push(`at ${issue.path.join(".")}`);
+      if (issue.expected) parts.push(`expected ${issue.expected}`);
+      if (issue.received) parts.push(`got ${issue.received}`);
+      return parts.join(", ") || issue.message;
+    });
+
+    const schema = g.object({ age: g.number() });
+    const result = schema.safeParse({ age: "hello" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues[0].message).toContain("at age");
+      expect(result.issues[0].message).toContain("expected number");
+      expect(result.issues[0].message).toContain("got string");
+    }
+  });
+
+  test("null error map resets to default", () => {
+    g.setErrorMap(() => "CUSTOM");
+    let result = g.string().safeParse(42);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.issues[0].message).toBe("CUSTOM");
+
+    g.setErrorMap(null as any);
+    result = g.string().safeParse(42);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.issues[0].message).toBe("Expected string");
   });
 });
 

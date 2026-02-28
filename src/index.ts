@@ -26,6 +26,27 @@ export class ValidationError extends Error {
   }
 }
 
+export type ErrorMap = (issue: ValidationIssue) => string;
+
+let _globalErrorMap: ErrorMap | null = null;
+
+export function setErrorMap(map: ErrorMap): void {
+  _globalErrorMap = map;
+}
+
+export function getErrorMap(): ErrorMap | null {
+  return _globalErrorMap;
+}
+
+/** Apply global error map to issues if one is set. */
+function applyErrorMap(issues: ValidationIssue[]): ValidationIssue[] {
+  if (!_globalErrorMap) return issues;
+  return issues.map((issue) => ({
+    ...issue,
+    message: _globalErrorMap!(issue),
+  }));
+}
+
 // ─── Result Type ────────────────────────────────────────────────────────────
 
 export type ParseResult<T> =
@@ -60,37 +81,43 @@ export abstract class Schema<T> {
   /** Parse and return the value, or throw ValidationError. */
   parse(value: unknown): T {
     const result = this._parse(value, [], false);
-    if (!result.ok) throw new ValidationError(result.issues);
+    if (!result.ok) throw new ValidationError(applyErrorMap(result.issues));
     return result.value;
   }
 
   /** Parse and return a result object (never throws). */
   safeParse(value: unknown): ParseResult<T> {
-    return this._parse(value, [], false);
+    const result = this._parse(value, [], false);
+    if (!result.ok) return { ok: false, issues: applyErrorMap(result.issues) };
+    return result;
   }
 
   /** Async parse and return the value, or throw ValidationError. */
   async parseAsync(value: unknown): Promise<T> {
     const result = await this._parseAsync(value, [], false);
-    if (!result.ok) throw new ValidationError(result.issues);
+    if (!result.ok) throw new ValidationError(applyErrorMap(result.issues));
     return result.value;
   }
 
   /** Async parse and return a result object (never throws). */
   async safeParseAsync(value: unknown): Promise<ParseResult<T>> {
-    return this._parseAsync(value, [], false);
+    const result = await this._parseAsync(value, [], false);
+    if (!result.ok) return { ok: false, issues: applyErrorMap(result.issues) };
+    return result;
   }
 
   /** Parse with coercion enabled (e.g. "123" → 123 for number). */
   coerce(value: unknown): T {
     const result = this._parse(value, [], true);
-    if (!result.ok) throw new ValidationError(result.issues);
+    if (!result.ok) throw new ValidationError(applyErrorMap(result.issues));
     return result.value;
   }
 
   /** Parse with coercion, returning a result (never throws). */
   safeCoerce(value: unknown): ParseResult<T> {
-    return this._parse(value, [], true);
+    const result = this._parse(value, [], true);
+    if (!result.ok) return { ok: false, issues: applyErrorMap(result.issues) };
+    return result;
   }
 
   /** Make this schema optional (value | undefined). */
@@ -1516,6 +1543,61 @@ export class PipeSchema<I, O> extends Schema<O> {
   }
 }
 
+// ─── Preprocess Schema ───────────────────────────────────────────────────────
+
+export class PreprocessSchema<T> extends Schema<T> {
+  constructor(
+    private readonly _transform: (value: unknown) => unknown,
+    private readonly _inner: Schema<T>
+  ) {
+    super();
+  }
+
+  _parse(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): ParseResult<T> {
+    let preprocessed: unknown;
+    try {
+      preprocessed = this._transform(value);
+    } catch (err: any) {
+      return {
+        ok: false,
+        issues: [
+          {
+            path,
+            message: `Preprocess failed: ${err?.message ?? String(err)}`,
+          },
+        ],
+      };
+    }
+    return this._inner._parse(preprocessed, path, coerce);
+  }
+
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<T>> {
+    let preprocessed: unknown;
+    try {
+      preprocessed = this._transform(value);
+    } catch (err: any) {
+      return {
+        ok: false,
+        issues: [
+          {
+            path,
+            message: `Preprocess failed: ${err?.message ?? String(err)}`,
+          },
+        ],
+      };
+    }
+    return this._inner._parseAsync(preprocessed, path, coerce);
+  }
+}
+
 // ─── Special Schemas ────────────────────────────────────────────────────────
 
 class AnySchema extends Schema<any> {
@@ -1744,6 +1826,13 @@ export { instanceof_ as instanceof };
 
 export function lazy<T>(getter: () => Schema<T>): LazySchema<T> {
   return new LazySchema(getter);
+}
+
+export function preprocess<T>(
+  transform: (value: unknown) => unknown,
+  schema: Schema<T>
+): PreprocessSchema<T> {
+  return new PreprocessSchema(transform, schema);
 }
 
 // ─── Convenience ────────────────────────────────────────────────────────────
