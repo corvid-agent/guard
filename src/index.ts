@@ -48,6 +48,15 @@ export abstract class Schema<T> {
     coerce: boolean
   ): ParseResult<T>;
 
+  /** Async parse — override in subclasses with async validation. */
+  _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<T>> {
+    return Promise.resolve(this._parse(value, path, coerce));
+  }
+
   /** Parse and return the value, or throw ValidationError. */
   parse(value: unknown): T {
     const result = this._parse(value, [], false);
@@ -58,6 +67,18 @@ export abstract class Schema<T> {
   /** Parse and return a result object (never throws). */
   safeParse(value: unknown): ParseResult<T> {
     return this._parse(value, [], false);
+  }
+
+  /** Async parse and return the value, or throw ValidationError. */
+  async parseAsync(value: unknown): Promise<T> {
+    const result = await this._parseAsync(value, [], false);
+    if (!result.ok) throw new ValidationError(result.issues);
+    return result.value;
+  }
+
+  /** Async parse and return a result object (never throws). */
+  async safeParseAsync(value: unknown): Promise<ParseResult<T>> {
+    return this._parseAsync(value, [], false);
   }
 
   /** Parse with coercion enabled (e.g. "123" → 123 for number). */
@@ -95,6 +116,23 @@ export abstract class Schema<T> {
   /** Add a custom refinement check. */
   refine(check: (value: T) => boolean, message?: string): RefineSchema<T> {
     return new RefineSchema(this, check, message ?? "Refinement check failed");
+  }
+
+  /** Add an async refinement check (use with parseAsync/safeParseAsync). */
+  refineAsync(
+    check: (value: T) => Promise<boolean>,
+    message?: string
+  ): RefineAsyncSchema<T> {
+    return new RefineAsyncSchema(
+      this,
+      check,
+      message ?? "Async refinement check failed"
+    );
+  }
+
+  /** Transform the parsed value asynchronously (use with parseAsync/safeParseAsync). */
+  transformAsync<U>(fn: (value: T) => Promise<U>): TransformAsyncSchema<T, U> {
+    return new TransformAsyncSchema(this, fn);
   }
 
   /** Pipe into another schema (parse with this, then validate with next). */
@@ -803,6 +841,65 @@ export class ObjectSchema<S extends ObjectShape> extends Schema<
     return { ok: true, value: output as Flatten<InferShape<S>> };
   }
 
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<Flatten<InferShape<S>>>> {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return {
+        ok: false,
+        issues: [
+          {
+            path,
+            message: "Expected object",
+            expected: "object",
+            received: Array.isArray(value) ? "array" : typeof value,
+          },
+        ],
+      };
+    }
+
+    const input = value as Record<string, unknown>;
+    const output: Record<string, unknown> = {};
+    const issues: ValidationIssue[] = [];
+
+    for (const [key, schema] of Object.entries(this._shape)) {
+      const result = await schema._parseAsync(input[key], [...path, key], coerce);
+      if (result.ok) {
+        if (result.value !== undefined) {
+          output[key] = result.value;
+        }
+      } else {
+        issues.push(...result.issues);
+      }
+    }
+
+    for (const key of Object.keys(input)) {
+      if (key in this._shape) continue;
+      if (this._catchall) {
+        const result = await this._catchall._parseAsync(
+          input[key],
+          [...path, key],
+          coerce
+        );
+        if (result.ok) {
+          output[key] = result.value;
+        } else {
+          issues.push(...result.issues);
+        }
+      } else if (this._strict) {
+        issues.push({
+          path: [...path, key],
+          message: `Unrecognized key "${key}"`,
+        });
+      }
+    }
+
+    if (issues.length) return { ok: false, issues };
+    return { ok: true, value: output as Flatten<InferShape<S>> };
+  }
+
   /** Reject objects with unknown keys. */
   strict(): ObjectSchema<S> {
     const s = new ObjectSchema(this._shape);
@@ -1114,6 +1211,16 @@ export class BrandedSchema<T, B extends string> extends Schema<Brand<T, B>> {
     if (!result.ok) return result as ParseResult<Brand<T, B>>;
     return { ok: true, value: result.value as Brand<T, B> };
   }
+
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<Brand<T, B>>> {
+    const result = await this._inner._parseAsync(value, path, coerce);
+    if (!result.ok) return result as ParseResult<Brand<T, B>>;
+    return { ok: true, value: result.value as Brand<T, B> };
+  }
 }
 
 export class OptionalSchema<T> extends Schema<T | undefined> {
@@ -1129,6 +1236,15 @@ export class OptionalSchema<T> extends Schema<T | undefined> {
     if (value === undefined) return { ok: true, value: undefined };
     return this._inner._parse(value, path, coerce);
   }
+
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<T | undefined>> {
+    if (value === undefined) return { ok: true, value: undefined };
+    return this._inner._parseAsync(value, path, coerce);
+  }
 }
 
 export class NullableSchema<T> extends Schema<T | null> {
@@ -1143,6 +1259,15 @@ export class NullableSchema<T> extends Schema<T | null> {
   ): ParseResult<T | null> {
     if (value === null) return { ok: true, value: null };
     return this._inner._parse(value, path, coerce);
+  }
+
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<T | null>> {
+    if (value === null) return { ok: true, value: null };
+    return this._inner._parseAsync(value, path, coerce);
   }
 }
 
@@ -1162,6 +1287,15 @@ export class DefaultSchema<T> extends Schema<T> {
     if (value === undefined) return { ok: true, value: this._default };
     return this._inner._parse(value, path, coerce);
   }
+
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<T>> {
+    if (value === undefined) return { ok: true, value: this._default };
+    return this._inner._parseAsync(value, path, coerce);
+  }
 }
 
 export class TransformSchema<I, O> extends Schema<O> {
@@ -1178,6 +1312,28 @@ export class TransformSchema<I, O> extends Schema<O> {
     coerce: boolean
   ): ParseResult<O> {
     const result = this._inner._parse(value, path, coerce);
+    if (!result.ok) return result as ParseResult<O>;
+    try {
+      return { ok: true, value: this._fn(result.value) };
+    } catch (err: any) {
+      return {
+        ok: false,
+        issues: [
+          {
+            path,
+            message: `Transform failed: ${err?.message ?? String(err)}`,
+          },
+        ],
+      };
+    }
+  }
+
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<O>> {
+    const result = await this._inner._parseAsync(value, path, coerce);
     if (!result.ok) return result as ParseResult<O>;
     try {
       return { ok: true, value: this._fn(result.value) };
@@ -1216,6 +1372,119 @@ export class RefineSchema<T> extends Schema<T> {
     }
     return result;
   }
+
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<T>> {
+    const result = await this._inner._parseAsync(value, path, coerce);
+    if (!result.ok) return result;
+    if (!this._check(result.value)) {
+      return { ok: false, issues: [{ path, message: this._message }] };
+    }
+    return result;
+  }
+}
+
+export class RefineAsyncSchema<T> extends Schema<T> {
+  constructor(
+    private readonly _inner: Schema<T>,
+    private readonly _check: (value: T) => Promise<boolean>,
+    private readonly _message: string
+  ) {
+    super();
+  }
+
+  _parse(
+    _value: unknown,
+    path: (string | number)[],
+    _coerce: boolean
+  ): ParseResult<T> {
+    return {
+      ok: false,
+      issues: [
+        {
+          path,
+          message:
+            "Schema contains async refinements. Use parseAsync() or safeParseAsync() instead of parse().",
+        },
+      ],
+    };
+  }
+
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<T>> {
+    const result = await this._inner._parseAsync(value, path, coerce);
+    if (!result.ok) return result;
+    try {
+      if (!(await this._check(result.value))) {
+        return { ok: false, issues: [{ path, message: this._message }] };
+      }
+    } catch (err: any) {
+      return {
+        ok: false,
+        issues: [
+          {
+            path,
+            message: `Async refinement failed: ${err?.message ?? String(err)}`,
+          },
+        ],
+      };
+    }
+    return result;
+  }
+}
+
+export class TransformAsyncSchema<I, O> extends Schema<O> {
+  constructor(
+    private readonly _inner: Schema<I>,
+    private readonly _fn: (value: I) => Promise<O>
+  ) {
+    super();
+  }
+
+  _parse(
+    _value: unknown,
+    path: (string | number)[],
+    _coerce: boolean
+  ): ParseResult<O> {
+    return {
+      ok: false,
+      issues: [
+        {
+          path,
+          message:
+            "Schema contains async transforms. Use parseAsync() or safeParseAsync() instead of parse().",
+        },
+      ],
+    };
+  }
+
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<O>> {
+    const result = await this._inner._parseAsync(value, path, coerce);
+    if (!result.ok) return result as ParseResult<O>;
+    try {
+      return { ok: true, value: await this._fn(result.value) };
+    } catch (err: any) {
+      return {
+        ok: false,
+        issues: [
+          {
+            path,
+            message: `Async transform failed: ${err?.message ?? String(err)}`,
+          },
+        ],
+      };
+    }
+  }
 }
 
 export class PipeSchema<I, O> extends Schema<O> {
@@ -1234,6 +1503,16 @@ export class PipeSchema<I, O> extends Schema<O> {
     const firstResult = this._first._parse(value, path, coerce);
     if (!firstResult.ok) return firstResult as ParseResult<O>;
     return this._second._parse(firstResult.value, path, coerce);
+  }
+
+  async _parseAsync(
+    value: unknown,
+    path: (string | number)[],
+    coerce: boolean
+  ): Promise<ParseResult<O>> {
+    const firstResult = await this._first._parseAsync(value, path, coerce);
+    if (!firstResult.ok) return firstResult as ParseResult<O>;
+    return this._second._parseAsync(firstResult.value, path, coerce);
   }
 }
 
